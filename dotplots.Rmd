@@ -1,0 +1,357 @@
+---
+title: "Untitled"
+author: "Aditi Goyal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message=FALSE)
+#knitr::opts_chunk$set(warning =FALSE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=70), tidy=TRUE)
+
+rm(list=ls())
+
+library(tidyverse)
+library(dplyr)
+library(tibble)
+library(DESeq2)
+library(EnhancedVolcano)
+library(readxl)
+library(umap)
+library(pheatmap)
+library(dendextend)
+library(colorspace)
+library(clusterProfiler)
+library(ggupset)
+library(enrichplot)
+library(eulerr)
+library(pathview)
+library("gridExtra")
+```
+
+```{r}
+setwd('~/Desktop/KAISHA')
+
+avg_counts=read_csv('avg_normalized_counts.csv')
+sd=read_tsv('featurecounts_rev/rnaseq_round2/rnaseq_round2.featurecounts.gene_name_annot.tsv')
+hs=read_tsv('featurecounts_rev/rnaseq_round1/rnaseq_round1.featurecounts.gene_name_annot.tsv')
+
+avg_counts=avg_counts[, -1]
+avg_counts=avg_counts%>%dplyr::rename('Geneid'='gene')
+
+hs=as.data.frame(hs)
+hs=hs[, c(1, 8:10)]
+hs=hs %>% mutate(avg=rowMeans(hs[2:4]))
+
+sd=as.data.frame(sd)
+sd=sd[, c(1, 27:28)]
+sd=sd %>% mutate(avg=rowMeans(sd[2:3]))
+
+G2_set=inner_join(avg_counts, sd) %>% select(Geneid, G2_avg, avg)
+
+G2_deg=read_csv('DEGs/G2_DEGs.csv')
+sd_deg=read_csv('DEGs/SD_DEGs.csv')
+G2_deg=G2_deg$Gene
+sd_deg=sd_deg$Gene
+
+G2_set=G2_set%>% mutate(group=case_when(
+  Geneid %in% G2_deg ~ 'G2 DEG',
+  Geneid %in% sd_deg ~ 'SD DEG',
+  TRUE ~'not significant in either'
+))
+
+G2_set=G2_set %>% mutate(G2_l2=log2(G2_avg))
+G2_set=G2_set %>% mutate(SD_l2=log2(avg))
+
+sd_lab=paste0('SD DEG (', length(sd_deg), ')')
+G2_lab=paste0('G2 DEG (', length(G2_deg), ')')
+G2_set=G2_set %>% filter(SD_l2!='-Inf')
+```
+
+```{r}
+y=G2_set$G2_l2
+x=G2_set$SD_l2
+
+data=data.frame('gene'=G2_set$Geneid, 
+                'x'=G2_set$SD_l2,
+                'y'=G2_set$G2_l2)
+```
+
+```{r}
+delta=y-x #get the differences between the two expression sets
+hist(delta) #visualize the differences
+```
+if we look at the differences between the count values, we see that it's mostly around 0, with a longer positive tail
+
+```{r}
+hist(G2_set$G2_avg-G2_set$avg)
+```
+same thing for the raw counts, although this distribution is much much tighter
+
+
+```{r}
+plot(delta)
+abline(0, 0, col='red')
+```
+
+```{r}
+#residuals=resid(model) this will get us the residuals from our model .9x
+residuals=delta  #this sets residuals to be how different the things are from each other
+
+#get standard error of the residuals from 0. so assuming that the population mean is 0. 
+residual_se <- sqrt(sum(residuals^2) / (length(residuals))) 
+
+# Calculate 95% confidence interval for y-values around x-values. Technically using the t distribution but it approximates normal fiven the sample size
+#proved by the fact that the 95% quantile for normal is 1.96
+confidence_interval <- qt(0.975, length(residuals) - 2) * residual_se
+
+# #if the true model was y=x, then for my prediction vector, the y_pred would be x
+# y_pred=x
+# 
+# lower=y_pred-confidence_interval #lower bound for where we think the y would be based off an x value
+# upper=y_pred+confidence_interval #upper bound for where we think the y would be based off an x value
+```
+
+```{r}
+new = seq(min(data$x), max(data$x), length.out = 100)
+newdata=data.frame('x'=x, 'y_pred'=x, 'lower'=x-confidence_interval, 'upper'=x+confidence_interval)
+```
+
+```{r}
+png('PRINT/SD_G2_dotplot.png', units = 'in', width=7, height=8, res=300)
+p=ggplot(G2_set) +
+  #plot the data
+  geom_point(data=G2_set[G2_set$group=='not significant in either', ], mapping=aes(x=SD_l2, y=G2_l2, color='not significant in either'),  size=2, alpha=0.5)+
+  geom_point(data=G2_set[G2_set$group=='SD DEG', ], mapping=aes(x=SD_l2, y=G2_l2, color=sd_lab),  size=2, alpha=.6)+
+  geom_point(data=G2_set[G2_set$group=='G2 DEG', ], mapping=aes(x=SD_l2, y=G2_l2, color=G2_lab),  size=2, alpha=0.6)+
+  scale_color_manual(values=c('blue', 'gray', 'gold'))+
+  
+  # add labels
+  labs(x='Stepdown Counts (log2 Scale)',
+       y='G2 Counts (log2 Scale)',
+       title = 'G2 v Stepdown Samples',
+       subtitle = 'Green indicates y=x region with 95% certainty')+
+  coord_equal()+
+  #add the confidence region
+  geom_line(data = newdata, aes(x = x, y = y_pred), color = "black", linetype='dashed') +
+  geom_ribbon(data = newdata, aes(x = y_pred, ymin = lower, ymax = upper), fill = "green", color='forestgreen', linetype='dotted', alpha = 0.05) +
+  theme_bw()
+
+p + theme(legend.position = "none") + theme(axis.text.x = element_text(size=14)) + theme(axis.text.y = element_text(size=14)) + theme(axis.title.x = element_text(size=14)) + theme(axis.title.y = element_text(size=14))
+dev.off()
+```
+
+# HS
+
+```{r}
+HS_set=inner_join(avg_counts, hs) %>% select(Geneid, G17_avg, avg)
+
+G17_deg=read_csv('DEGs/G17_DEGs.csv')
+hs_deg=read_csv('DEGs/heatshock_DEGs.csv')
+
+G17_deg=G17_deg$Gene
+hs_deg=hs_deg$Gene
+
+both=G17_deg[G17_deg %in% hs_deg]
+
+HS_set=HS_set%>% mutate(group=case_when(
+  Geneid %in% both ~ 'DEG in both',
+  Geneid %in% G17_deg ~ 'G17 DEG',
+  Geneid %in% hs_deg ~ 'HS DEG',
+  TRUE ~'not significant in either'
+))
+
+HS_set=HS_set %>% mutate(G17_l2=log2(G17_avg))
+HS_set=HS_set %>% mutate(HS_l2=log2(avg))
+
+HS_set=HS_set %>% filter(HS_l2!='-Inf')
+
+hs_lab=paste0('HS DEG (', length(hs_deg)-length(both), ')')
+both_lab=paste0('DEG in both (', length(both), ')')
+G17_lab=paste0('G17 DEG (', length(G17_deg)-length(both), ')')
+```
+
+```{r}
+HS_set %>% arrange((G17_l2)) #g17 is fine
+
+HS_set %>% arrange(desc(HS_l2)) #hs had -Inf
+```
+
+```{r}
+y=HS_set$HS_l2
+x=HS_set$G17_l2
+
+data=data.frame('gene'=HS_set$Geneid, 
+                'x'=HS_set$G17_l2,
+                'y'=HS_set$HS_l2)
+```
+
+```{r}
+delta=y-x #get the differences between the two expression sets
+hist(delta) #visualize the differences
+```
+if we look at the differences between the count values, we see that it's mostly around 0, with a longer positive tail
+
+```{r}
+hist(HS_set$avg-HS_set$G17_avg)
+```
+
+raw counts have a HUGE left skew
+
+```{r}
+plot(delta)
+abline(0, 0, col='red')
+```
+
+
+```{r}
+#residuals=resid(model) this will get us the residuals from our model .9x
+residuals=delta  #this sets residuals to be how different the things are from each other
+
+#get standard error of the residuals from 0. so assuming that the population mean is 0. 
+residual_se <- sqrt(sum(residuals^2) / (length(residuals))) 
+
+# Calculate 95% confidence interval for y-values around x-values. Technically using the t distribution but it approximates normal fiven the sample size
+#proved by the fact that the 95% quantile for normal is 1.96
+confidence_interval <- qt(0.975, length(residuals) - 2) * residual_se
+
+# #if the true model was y=x, then for my prediction vector, the y_pred would be x
+# y_pred=x
+# 
+# lower=y_pred-confidence_interval #lower bound for where we think the y would be based off an x value
+# upper=y_pred+confidence_interval #upper bound for where we think the y would be based off an x value
+```
+
+```{r}
+new = seq(min(data$x), max(data$x), length.out = 100)
+newdata=data.frame('x'=x, 'y_pred'=x, 'lower'=x-confidence_interval, 'upper'=x+confidence_interval)
+```
+
+```{r}
+png('PRINT/HS_G17_dotplot.png', units = 'in', width=7, height=8, res=300)
+p=ggplot(HS_set) +
+  #plot the data
+  geom_point(data=HS_set[HS_set$group=='not significant in either', ], mapping=aes(x=G17_l2, y=HS_l2, color='not significant in either'),  size=2, alpha=0.5)+
+  geom_point(data=HS_set[HS_set$group=='HS DEG', ], mapping=aes(x=G17_l2, y=HS_l2, color=hs_lab),  size=2, alpha=.6)+
+  geom_point(data=HS_set[HS_set$group=='G17 DEG', ], mapping=aes(x=G17_l2, y=HS_l2, color=G17_lab),  size=2, alpha=0.6)+
+  geom_point(data=HS_set[HS_set$group=='DEG in both', ], mapping=aes(x=G17_l2, y=HS_l2, color=both_lab),  size=2, alpha=.6)+
+  #scale_color_manual(values=c('blue', 'green', 'gray', 'gold'))+
+  scale_color_manual(values=c('green', 'blue', 'gold', 'gray'))+
+  
+  # add labels
+  labs(x='G17 Counts (log2 Scale)',
+       y='Heatshock Counts (log2 Scale)',
+       title = 'Gene Expression Similarity between Heatshock and G17 Samples',
+       subtitle = 'Green indicates y=x region with 95% certainty')+
+  coord_equal()+
+  
+  #add the confidence region
+  geom_line(data = newdata, aes(x = x, y = y_pred), color = "black", linetype='dashed') +
+  geom_ribbon(data = newdata, aes(x = y_pred, ymin = lower, ymax = upper), fill = "green", color='forestgreen', linetype='dotted', alpha = 0.05) +
+  theme_bw()
+
+p + theme(legend.position = "none") + theme(axis.text.x = element_text(size=14)) + theme(axis.text.y = element_text(size=14)) + theme(axis.title.x = element_text(size=14)) + theme(axis.title.y = element_text(size=14))
+
+dev.off()
+```
+
+
+
+# ANNEX
+
+
+
+
+```
+t.test(delta)
+delta_raw=G2_set$G2_avg-G2_set$avg
+
+data=data.frame(x=G2_set$SD_l2, y=G2_set$G2_l2)
+model <- lm(y ~ x, data = data)
+
+# Use the 'predict()' function with the 'newdata' parameter set to 'data'
+predictions <- predict(model, newdata = data, interval = "confidence", level = 0.95)
+
+# Plot the data, the y=x line, and the 95% confidence region
+plot(data$x, data$y)
+abline(a = 0, b = 1, col = "red")
+lines(data$x, predictions[, "lwr"], col = "blue")
+lines(data$x, predictions[, "upr"], col = "blue")
+
+ggplot(G2_set, aes(x=avg, y=G2_avg)) + geom_point()+
+  coord_equal()+
+  geom_abline(slope=1)+
+  theme_bw()
+
+model_raw=lm(G2_avg ~ avg, data=G2_set)
+summary(model_raw)
+
+confint(model_raw, 'avg', level=0.95)
+```
+```
+# Assuming you have your data in a data frame, replace 'data' with your data frame name
+# Example: data <- read.csv("your_data.csv")
+
+# Fit a linear regression model
+model <- lm(y ~ x)
+
+# Summarize the model to get coefficients and residuals
+summary(model)
+
+# Calculate residuals and standard error of residuals
+residuals <- resid(model)
+residual_se <- sqrt(sum(residuals^2) / (length(residuals) - 2))
+
+# Calculate 95% confidence interval for y-values around x-values
+confidence_interval <- qt(0.975, length(residuals) - 2) * residual_se
+
+# Create a new data frame with x and y values for the y=x line
+y_equals_x <- data.frame(x = seq(min(data$x), max(data$x), length.out = 100), y = seq(min(data$x), max(data$x), length.out = 100))
+
+# Predict y-values for the y=x line
+y_equals_x$y_pred <- predict(model, newdata = y_equals_x)
+
+# Add confidence intervals
+y_equals_x$lower_ci <- y_equals_x$y_pred - confidence_interval
+y_equals_x$upper_ci <- y_equals_x$y_pred + confidence_interval
+
+# Create a scatterplot
+library(ggplot2)
+p <- ggplot(G2_set, aes(x = SD_l2, y = G2_l2)) +
+  geom_point() +
+  geom_line(data = y_equals_x, aes(x = x, y = y_pred), color = "blue") +
+  geom_ribbon(data = y_equals_x, aes(x = x, ymin = lower_ci, ymax = upper_ci), fill = "blue", alpha = 0.2) +
+  labs(title = "Scatterplot with Confidence Region around y=x Line") +
+  theme_minimal()
+
+# Print the plot
+print(p)
+
+```
+
+```{r}
+sd(G2_set$G2_l2)
+```
+
+```{r}
+G2_DEG=G2_set %>% filter(group!='not significant in either')
+```
+```{r}
+ggplot(G2_DEG)+
+  # geom_point(data=G2_DEG[G2_DEG$group=='not significant in either', ], mapping=aes(x=SD_l2, y=G2_l2, color='not significant in either'),  size=2, alpha=0.3)+
+  geom_point(data=G2_DEG[G2_DEG$group=='SD DEG', ], mapping=aes(x=SD_l2, y=G2_l2, color=sd_lab),  size=2, alpha=.6)+
+  geom_point(data=G2_DEG[G2_DEG$group=='G2 DEG', ], mapping=aes(x=SD_l2, y=G2_l2, color=G2_lab),  size=2, alpha=0.6)+
+  geom_smooth(data=G2_DEG, mapping=aes(x=SD_l2, y=G2_l2), method="lm", formula=y~x, linetype="dashed",
+             color="darkred", fill='purple', se=TRUE, level=0.99) +
+  stat_poly_eq(parse=T, aes(x=SD_l2, y=G2_l2,label = ..eq.label..), formula=y~x)+
+  #stat_poly_eq(parse=T, aes(x=SD_l2, y=G2_l2), formula=y~x, position = "identity")+
+  scale_color_manual(values=c('blue', 'gold'))+
+  labs(x='Stepdown Counts (log2 Scale)',
+       y='G2 Counts (log2 Scale)')+
+  coord_equal()+
+  theme_bw()
+```
+

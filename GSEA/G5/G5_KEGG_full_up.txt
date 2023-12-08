@@ -1,0 +1,3 @@
+pathway NES_avg padj_avg padj NES gene_ratio NES_GSEA FDR q-val_GSEA gene_ratio_GSEA gene_ratio_avg
+NA NA NA NA NA NA NA NA NA NA
+sep00970 1.8168273 0.036733437 NA NA NA 1.8168273 0.036733437 0.21 0.21

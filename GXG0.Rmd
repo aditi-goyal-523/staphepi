@@ -1,0 +1,303 @@
+---
+title: "final code GXG0"
+author: "Aditi Goyal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message=FALSE)
+#knitr::opts_chunk$set(warning =FALSE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=70), tidy=TRUE)
+
+rm(list=ls())
+
+library(tidyverse)
+library(dplyr)
+library(tibble)
+library(DESeq2)
+library(EnhancedVolcano)
+library(readxl)
+library(umap)
+library(pheatmap)
+library(dendextend)
+library(colorspace)
+library(clusterProfiler)
+library(ggupset)
+library(enrichplot)
+library(eulerr)
+library(pathview)
+library("gridExtra")
+```
+
+```{r}
+setwd('~/Desktop/KAISHA')
+```
+
+# Loading Data
+```{r}
+all=read_tsv('featurecounts_rev/rnaseq_round2/rnaseq_round2.featurecounts.gene_name_extended_annot.tsv')
+all=as.data.frame(all)
+
+#split data into a gene_metadata set and the raw counts matrix
+gene_meta=all[, 1:8]
+counts=all[, c(1, 9:35)]
+
+#load sample metadata
+meta=read.csv('mappings/sample metadata.csv')
+meta=meta[, 1:3]
+```
+
+# Data Preprocessing
+```{r}
+#remove blank genes
+counts=counts[rowSums(counts[, 2:28])>0, ]
+#counts=counts%>%rename('Geneid'='Gene')
+
+counts
+```
+
+
+make counts in ascending molar order
+```{r}
+counts=counts %>% relocate(c('G2_1', "G2_2", 'G2_3'), .after = 'G0_3') %>%
+  relocate(c("G5_1", "G5_2", "G5_3"), .after = 'G2_3')
+```
+
+# create primary contrasts subset
+```{r}
+primary=counts[, 1:19]
+p_meta=meta[1:18, ]
+
+primary
+```
+
+#  deseq pipeline
+
+## step 1: creating the object
+
+```{r}
+dds=DESeqDataSetFromMatrix(countData=primary, 
+                              colData=p_meta, 
+                              design=~group, tidy = TRUE)
+```
+
+## step 2: filtering out low count genes
+```{r}
+keep <- rowSums(counts(dds)) >= 0
+dds <- dds[keep,]
+```
+
+## step 3: run deseq
+```{r}
+dds <- DESeq(dds)
+resultsNames(dds)
+```
+
+```{r}
+G10_G0 <- as.data.frame(lfcShrink(dds, coef = 2, type = 'apeglm'))
+G17_G0 =as.data.frame(lfcShrink(dds, coef = 3, type = 'apeglm'))
+G2_G0=as.data.frame(lfcShrink(dds, coef = 4, type = 'apeglm'))
+G5_G0=as.data.frame(lfcShrink(dds, coef = 5, type = 'apeglm'))
+G50_G0=as.data.frame(lfcShrink(dds, coef = 6, type = 'apeglm'))
+```
+
+```{r}
+# write.csv(G10_G0, 'DESeq output/G10_G0.csv')
+# write.csv(G17_G0, 'DESeq output/G17_G0.csv')
+# write.csv(G5_G0, 'DESeq output/G5_G0.csv')
+# write.csv(G2_G0, 'DESeq output/G2_G0.csv')
+# write.csv(G50_G0, 'DESeq output/G50_G0.csv')
+```
+
+### normalized_counts
+```{r}
+normalized_counts <- counts(dds, normalized=TRUE)
+#write.table(normalized_counts, file="normalized_counts.txt", sep="\t", quote=F, col.names=NA)
+```
+
+```{r}
+G2_genes=G2_G0 %>% filter(abs(log2FoldChange)>=1)
+G5_genes=G5_G0 %>% filter(abs(log2FoldChange)>=1)
+G10_genes=G10_G0 %>% filter(abs(log2FoldChange)>=1)
+G17_genes=G17_G0 %>% filter(abs(log2FoldChange)>=1)
+```
+
+```{r}
+set=c(rownames(G2_genes), rownames(G5_genes), rownames(G10_genes), rownames(G17_genes))
+```
+
+```{r}
+lfc1_gene_list=unique(set)
+write.table(lfc1_gene_list, 'lfc1_gene_list.txt', row.names = FALSE)
+```
+
+# Average Gene Counts
+```{r}
+normalized_counts=as.data.frame(normalized_counts)
+
+
+avg_normalized_counts=data.frame('gene'=rownames(normalized_counts),
+                      'G0_avg'=rowMeans(normalized_counts[1:3]),
+                      'G2_avg'=rowMeans(normalized_counts[4:6]),
+                      'G5_avg'=rowMeans(normalized_counts[7:9]),
+                      'G10_avg'=rowMeans(normalized_counts[10:12]),
+                      'G17_avg'=rowMeans(normalized_counts[13:15]),
+                      'G50_avg'=rowMeans(normalized_counts[16:18]))
+  
+#write.csv(avg_normalized_counts, 'avg_normalized_counts.csv')
+  
+long_avg_norm=avg_normalized_counts%>% gather(colnames(avg_normalized_counts[2:7]), key='sample', value='avg_norm_counts')  
+
+
+long_avg_norm=long_avg_norm %>% mutate(concentration = case_when(sample == "G0_avg" ~ 0, 
+                                sample == "G2_avg" ~ 2,
+                                sample == "G5_avg" ~ 5,
+                                sample == 'G10_avg' ~ 10,
+                                sample == "G17_avg" ~ 17,
+                                sample == 'G50_avg' ~ 50))
+
+
+long_avg_norm
+```
+
+### Volcano Plots
+
+```{r}
+padj.cutoff <- 0.05
+lfc.cutoff <- 1.5
+```
+
+```{r}
+volcano_prepper=function(df){
+  df=df %>% mutate(color=case_when(
+  log2FoldChange<=-1.5 ~ 'blue',
+  log2FoldChange>=1.5 ~'tomato2',
+  .default = 'grey'))
+
+colors=df$color
+
+down_num=dim(df%>%filter(log2FoldChange<=-1*lfc.cutoff)%>%filter(padj<=padj.cutoff))[1]
+
+up_num=dim(df%>%filter(log2FoldChange>=lfc.cutoff)%>%filter(padj<=padj.cutoff))[1]
+
+names(colors)[colors =='blue'] <- paste0('downregulated genes (', down_num, ')')
+names(colors)[colors =='tomato2'] <- paste0('upregulated genes (', up_num, ')')
+names(colors)[colors =='grey'] <- 'no significant change'
+
+#subtitle=paste0(up_num, ' upregulated genes, ', down_num, ' downregulated genes')
+
+return(list(df, colors))
+}
+```
+
+```{r}
+G17_volcano=volcano_prepper(G17_G0)[[1]]
+colors=volcano_prepper(G17_G0)[[2]]
+```
+
+```{r}
+#jpeg('Volcanos/G17_G0_volcano.jpeg',units="in", width=10, height=7, res=300)
+volcano=EnhancedVolcano(G17_volcano,
+    lab = rownames(G17_volcano),
+    x = 'log2FoldChange',
+    selectLab = NA,
+    ylim = c(0, 20),
+    xlim=c(-7, 7),
+    y = 'padj',
+    title = paste('17 mM vs 0 mM Volcano Plot'),
+    subtitle = "",
+    colCustom = colors,
+    pCutoff = padj.cutoff,
+    FCcutoff = lfc.cutoff)
+
+line.data <- data.frame(xintercept = c(4, 5, 6, -4, -5, -6), Lines = c("16", "32", "64", "16", "32", "64"))
+```
+
+```{r}
+png('PRINT/G17_G0_volcano.png',units="in", width=10, height=7, res=300)
+volcano+
+  annotate("text", line.data$xintercept, y=19, hjust = .5, label = line.data$Lines, size = 5) +
+  
+  theme(axis.text.x = element_text(size = 16),
+        axis.text.y = element_text(size = 16))+
+  theme(legend.text = element_text(size=16))+
+  theme(axis.title.x =element_text(size=16) )+
+  theme(axis.title.y = element_text(size=16))+
+
+scale_x_continuous(limits = c(-7, 7), breaks = c(-6, -4, -2, 0, 2, 4, 6))+
+geom_segment(aes(x = 4 , y = -Inf, xend = 4, yend = 18), linetype=2, color='indianred') +
+geom_segment(aes(x = 5 , y = -Inf, xend = 5, yend = 18), linetype=2, color='indianred') +
+geom_segment(aes(x = 6 , y = -Inf, xend = 6, yend = 18), linetype=2, color='indianred') +
+geom_segment(aes(x = -4 , y = -Inf, xend = -4, yend = 18), linetype=2, color='steelblue') +
+geom_segment(aes(x = -5 , y = -Inf, xend = -5, yend = 18), linetype=2, color='steelblue') +
+geom_segment(aes(x = -6 , y = -Inf, xend = -6, yend = 18), linetype=2, color='steelblue') +
+  labs(caption='')
+dev.off()
+```
+
+# Writing DEG Files
+```{r}
+G2_sig=G2_G0%>%filter(padj<=0.05)%>%filter(abs(log2FoldChange)>=1.5)%>%arrange(desc(log2FoldChange))%>%select(log2FoldChange, padj)%>%rownames_to_column('Gene')
+
+G5_sig=G5_G0%>%filter(padj<=0.05)%>%filter(abs(log2FoldChange)>=1.5)%>%arrange(desc(log2FoldChange))%>%select(log2FoldChange, padj)%>%rownames_to_column('Gene')
+
+G10_sig=G10_G0%>%filter(padj<=0.05)%>%filter(abs(log2FoldChange)>=1.5)%>%arrange(desc(log2FoldChange))%>%select(log2FoldChange, padj)%>%rownames_to_column('Gene')
+
+G17_sig=G17_G0%>%filter(padj<=0.05)%>%filter(abs(log2FoldChange)>=1.5)%>%arrange(desc(log2FoldChange))%>%select(log2FoldChange, padj)%>%rownames_to_column('Gene')
+
+G50_sig=G50_G0%>%filter(padj<=0.05)%>%filter(abs(log2FoldChange)>=1.5)%>%arrange(desc(log2FoldChange))%>%select(log2FoldChange, padj)%>%rownames_to_column('Gene')
+```
+
+# VENNS
+
+```{r}
+names=list('G2'=G2_sig$Gene,
+           'G5'=G5_sig$Gene,
+           'G10'=G10_sig$Gene,
+           'G17'=G17_sig$Gene,
+           'G50'=G50_sig$Gene)
+```
+```{r}
+G2_pos=G2_sig%>%filter(log2FoldChange>=0)
+G5_pos=G5_sig%>%filter(log2FoldChange>=0)
+G10_pos=G10_sig%>%filter(log2FoldChange>=0)
+G17_pos=G17_sig%>%filter(log2FoldChange>=0)
+G50_pos=G50_sig%>%filter(log2FoldChange>=0)
+
+G2_neg=G2_sig%>%filter(log2FoldChange<=0)
+G5_neg=G5_sig%>%filter(log2FoldChange<=0)
+G10_neg=G10_sig%>%filter(log2FoldChange<=0)
+G17_neg=G17_sig%>%filter(log2FoldChange<=0)
+G50_neg=G50_sig%>%filter(log2FoldChange<=0)
+```
+
+```{r}
+# all 5 groups
+pos_names=list('G2'=G2_pos$Gene,
+           'G5'=G5_pos$Gene,
+           'G10'=G10_pos$Gene,
+           'G17'=G17_pos$Gene,
+           'G50'=G50_pos$Gene)
+
+pos_venn_plot <- venn(pos_names)
+
+neg_names=list('G2'=G2_neg$Gene,
+           'G5'=G5_neg$Gene,
+           'G10'=G10_neg$Gene,
+           'G17'=G17_neg$Gene,
+           'G50'=G50_neg$Gene)
+
+neg_venn_plot <- venn(neg_names)
+
+a=plot(pos_venn_plot, main='Upregulated Genes')
+b=plot(neg_venn_plot, main='Downregulated Genes')
+```
+
+```{r}
+#png('PRINT/GX_venns.png',units="in", width=7, height=5, res=300)
+grid.arrange(a, b, ncol = 2) 
+#dev.off()
+```
+

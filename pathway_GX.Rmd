@@ -1,0 +1,649 @@
+---
+title: "final pathway GxG0"
+author: "Aditi Goyal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning  = FALSE)
+knitr::opts_chunk$set(message  = FALSE)
+```
+
+```{r}
+library(fgsea)
+library(tidyverse)
+library(dplyr)
+library(tibble)
+library(GO.db)
+library(KEGGREST)
+```
+
+
+```{r}
+rm(list=ls())
+setwd('~/Desktop/KAISHA')
+```
+
+# Setup
+```{r}
+full_map=read_csv('mappings/full_map.csv')
+G10_G0=read.csv('G10_G0.csv')
+G17_G0=read.csv('G17_G0.csv')
+```
+
+```{r}
+GO <- as.list(GOTERM)
+#go_gmt=gmtPathways('go_uniprot.gmt') #taxon id long one
+go_gmt=gmtPathways('GSEA/go_1282.gmt')
+```
+
+```{r}
+pathways.list <- keggList("pathway", "sep")
+pathway.codes <- sub("path:", "", names(pathways.list)) 
+
+kegg_gmt=gmtPathways('kegg.gmt')
+```
+
+# Functions
+```{r}
+deseq_format = function(df){
+  colnames(df)[1]='X'
+  df=df%>%dplyr::rename('gene_name'='X')
+  
+  #remove _C suffix
+  df$gene_name=gsub(pattern = '_C', replacement = '', df$gene_name)
+  
+  #remove _P suffix
+  df$gene_name=gsub(pattern = '_P', replacement = '', df$gene_name)
+  
+  if ('lepBP' %in% df$gene_name){
+    names=df$gene_name
+    names[names=='lepBP']='lepB'
+    df$gene_name=names
+  }
+  
+  merged=inner_join(df, full_map, by='gene_name')
+  return(merged)
+}
+```
+
+```{r}
+counts_to_fgsea_GO=function(df, p=0.05){
+  df_formatted=deseq_format(df)
+  
+  ranks=df_formatted$log2FoldChange
+  names(ranks)=df_formatted$uniprot_quickGO
+  ranks=sort(ranks, decreasing = TRUE)
+  
+  set.seed(12345)
+  fgsea_res=fgsea(go_gmt, ranks, minSize = 15, maxSize = 500)
+  
+  fgsea_res=fgsea_res%>%mutate(overlap = lengths(leadingEdge))%>%mutate(gene_ratio=overlap/size)
+  
+  sig_fgsea=fgsea_res%>%filter(padj<=p) %>% relocate(padj, .after = pathway)
+  
+  sig_fgsea=sig_fgsea%>%dplyr::select(pathway, padj, NES, gene_ratio)
+  
+  fgsea_up=sig_fgsea%>%filter(NES>0)
+  fgsea_down=sig_fgsea%>%filter(NES<0)
+  
+  return(list(fgsea_up, fgsea_down))
+}
+```
+
+
+```{r}
+counts_to_fgsea_KEGG=function(df, p=0.05){
+  df_formatted=deseq_format(df)
+  
+  ranks=df_formatted$log2FoldChange
+  names(ranks)=df_formatted$sseqid
+  ranks=sort(ranks, decreasing = TRUE)
+  
+  set.seed(12345)
+  fgsea_res=fgsea(kegg_gmt, ranks, minSize = 15, maxSize = 500)
+  
+  fgsea_res=fgsea_res%>%mutate(overlap = lengths(leadingEdge))%>%mutate(gene_ratio=overlap/size)
+  
+  sig_fgsea=fgsea_res%>%filter(padj<=p) %>% relocate(padj, .after = pathway)
+  
+  sig_fgsea=sig_fgsea%>%dplyr::select(pathway, padj, NES, gene_ratio)
+  
+  fgsea_up=sig_fgsea%>%filter(NES>0)
+  fgsea_down=sig_fgsea%>%filter(NES<0)
+  
+  return(list(fgsea_up, fgsea_down))
+}
+```
+
+```{r}
+format_gsea_results=function(df, p=0.05){
+  
+  df$gene_ratio=sub(',.*', '',df$`LEADING EDGE` )
+
+  df$gene_ratio=sub('tags=', '', df$gene_ratio)
+
+  df$gene_ratio=sub('%', '', df$gene_ratio)
+
+df$gene_ratio=as.numeric(df$gene_ratio)
+
+df$gene_ratio=df$gene_ratio/100
+
+sig_df=df%>%filter(`FDR q-val` <=p)
+  
+  sig_df=sig_df%>%dplyr::select(NAME, NES, `FDR q-val`, gene_ratio)
+  colnames(sig_df)=paste0(colnames(sig_df), '_GSEA')
+  sig_df=sig_df%>%dplyr::rename('pathway'='NAME_GSEA')
+  return(sig_df)
+}
+```
+
+```{r fishers Method}
+fishersMethod = function(x) pchisq(-2 * sum(log(x)),df=2*length(x),lower=FALSE)
+```
+
+```{r}
+fisher_combine=function(df){
+  ps=df %>% dplyr::select(padj, `FDR q-val_GSEA` )
+  ps=ps %>% mutate(padj_avg=apply(ps, MARGIN = 1, fishersMethod))
+  
+  ps=ps%>% mutate(padj_avg=case_when(
+  is.na(padj_avg)== TRUE~ padj, 
+  .default = padj_avg
+))
+  
+  ps=ps%>% mutate(padj_avg=case_when(
+  is.na(padj_avg)== TRUE~ `FDR q-val_GSEA`,
+  .default = padj_avg
+))
+ 
+  df=df%>%mutate(padj_avg=ps$padj_avg)
+  
+  return(df)
+}
+```
+
+```{r}
+mega_pathway_analysis=function(df, group, ont=c('GO', 'KEGG'), p=0.05, path_up, path_down){
+
+############ FGSEA RESULTS
+if(ont=='GO'){
+  fgsea_up=as.data.frame(counts_to_fgsea_GO(df, p = p)[1])
+  fgsea_down=as.data.frame(counts_to_fgsea_GO(df, p = p)[2])
+} else if(ont=='KEGG'){
+  fgsea_up=as.data.frame(counts_to_fgsea_KEGG(df, p = p)[1])
+  fgsea_down=as.data.frame(counts_to_fgsea_KEGG(df, p = p)[2])
+}
+
+############ GSEA DESKTOP RESULTS
+gsea_up=read_tsv(path_up)
+gsea_down=read_tsv(path_down)
+gsea_up=format_gsea_results(gsea_up, p=p)
+gsea_down=format_gsea_results(gsea_down, p=p)
+
+############ FORMAT KEGG ID FOR MERGE
+if(ont=='KEGG'){
+  gsea_up$pathway=tolower(gsea_up$pathway)
+  gsea_down$pathway=tolower(gsea_down$pathway)
+}
+
+############ PREVENT ZERO RESULTS FROM CRASHING MERGE
+if(dim(fgsea_up)[1]==0){
+  fgsea_up[1, ]=NA
+}else if(dim(fgsea_down)[1]==0){
+  fgsea_down[1, ]=NA
+}else if(dim(gsea_up)[1]==0){
+  gsea_up[1, ]=NA
+}else if(dim(gsea_down)[1]==0){
+  gsea_down[1, ]=NA
+}
+
+full_down=full_join(fgsea_down, gsea_down)
+full_up=full_join(fgsea_up, gsea_up)
+
+############ FISHERS METHOD -- COMBINE P VALUES
+full_down=fisher_combine(full_down)
+full_up=fisher_combine(full_up)
+
+############ COMBINE OTHER VARIABLES
+
+full_down=full_down%>%
+  #mutate(padj_avg=fishersMethod(across(c(padj, `FDR q-val_GSEA`))))%>%
+  #mutate(padj_avg = rowMeans(across(c(padj, `FDR q-val_GSEA`)), na.rm=TRUE)) %>%
+  mutate(NES_avg = rowMeans(across(c(NES, NES_GSEA)), na.rm=TRUE)) %>% 
+  mutate(gene_ratio_avg=rowMeans(across(c(gene_ratio, gene_ratio_GSEA)), na.rm=TRUE))
+
+full_up=full_up%>%
+  #mutate(padj_avg=fishersMethod(across(c(padj, `FDR q-val_GSEA`))))
+  #mutate(padj_avg = rowMeans(across(c(padj, `FDR q-val_GSEA`)), na.rm=TRUE)) %>%
+  mutate(NES_avg = rowMeans(across(c(NES, NES_GSEA)), na.rm=TRUE)) %>%
+  mutate(gene_ratio_avg=rowMeans(across(c(gene_ratio, gene_ratio_GSEA)), na.rm=TRUE))
+
+########### EXPORT DATAFRAMES
+# full_down=full_down%>%relocate(padj_avg, .after = pathway)%>%relocate(NES_avg, .after = padj_avg)
+# full_up=full_up%>%relocate(padj_avg, .after = pathway)%>%relocate(NES_avg, .after = padj_avg)
+
+full_down=full_down%>%relocate(NES_avg, .after = pathway)%>%relocate(padj_avg, .after = NES_avg)
+full_up=full_up%>%relocate(NES_avg, .after = pathway)%>%relocate(padj_avg, .after = NES_avg)
+
+filename=paste0('GSEA/', group, '/', group, '_', ont)
+
+write.table(full_down, file=paste0(filename, '_full_down.txt'), quote=FALSE, row.names = FALSE)
+write.table(full_up, file=paste0(filename, '_full_up.txt'), quote=FALSE, row.names = FALSE)
+
+return(list(full_up, full_down))
+}
+```
+
+```{r}
+go_trim_merger=function(df_trim_up, df_trim_down, df_full_up, df_full_down){
+  df_trim_up=df_trim_up%>% dplyr::rename('pathway'='TermID')
+  df_trim_down=df_trim_down%>% dplyr::rename('pathway'='TermID')
+  
+  complete_up=inner_join(df_full_up, df_trim_up)
+  complete_down=inner_join(df_full_down, df_trim_down)
+  
+  complete_up=complete_up%>% 
+    mutate(padj_avg=case_when(padj_avg==0 ~.000000001, .default = padj_avg)) %>% 
+    mutate(p_transform=-log(padj_avg, base = 10))%>%
+    relocate(p_transform, .after = padj_avg)
+  
+  complete_down=complete_down%>% 
+    mutate(padj_avg=case_when(padj_avg==0 ~.000000001, .default = padj_avg)) %>%
+    mutate(p_transform=-log(padj_avg, base = 10))%>%
+    relocate(p_transform, .after = padj_avg)
+
+  return(list(complete_up, complete_down))
+}
+```
+
+```{r}
+kegg_formatter=function(df){
+  df=df%>% 
+    mutate(padj_avg=case_when(padj_avg==0 ~.000000001, .default = padj_avg)) %>% 
+    mutate(p_transform=-log(padj_avg, base = 10))%>%
+    relocate(p_transform, .after = padj_avg)
+
+up_names=pathways.list[df$pathway]
+pathway_id=names(up_names)
+pathway_name=unname(up_names)
+pathway_name=gsub(' - Staphylococcus epidermidis ATCC 12228', '', pathway_name)
+pathway=data.frame("pathway"=pathway_id,
+                      'pathway_name'=pathway_name)
+df=inner_join(pathway, df, by='pathway')
+
+df=df%>%dplyr::rename('Name'='pathway_name')
+
+return(df)
+}
+```
+
+```{r}
+pathway_visualizer=function(df, group, ont=c('GO', 'KEGG'), direction=c('up', 'down')){
+  
+  df <- df[!is.na(df$pathway), ] 
+  
+  if(direction=='down'){
+    title=paste(group, 'Significantly Suppressed Pathways' )
+  } else if(direction=='up'){
+    title=paste(group, 'Significantly Enriched Pathways' )
+  }
+
+  sub=paste(ont, 'database')
+  
+    p=ggplot(df, aes(x=p_transform, y=Name)) + 
+    geom_point(aes(colour=gene_ratio_avg), size=3) + 
+    geom_point(shape = 1,size = 3,colour = "black") +
+  labs(title=title, subtitle = sub) +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+        theme(plot.subtitle = element_text(face='italic')) +
+   theme_bw() + xlab('p value (-log10 scale)') + ylab('Significant Pathways') +
+ #geom_text(aes(label = percent, vjust = 0.5, hjust=-0.5)) + 
+  scale_size(guide="none") +
+  scale_color_continuous(low='lightgray', high='darkgreen')
+    
+  plotname=paste(group, ont, direction, sep = '_')
+  png(filename=paste0('GSEA/figures/', plotname, '.png'), units = 'in', height = 9, width = 9, res = 300)
+  print(p)
+  dev.off()
+}
+```
+
+```{r}
+plot_combiner=function(df_go, df_kegg, group, direction=c('up', 'down')){
+  
+  df_go <- df_go[!is.na(df_go$pathway), ] 
+  df_kegg <- df_kegg[!is.na(df_kegg$pathway), ] 
+  
+  if(direction=='down'){
+    title=paste(group, 'Significantly Suppressed Pathways' )
+  } else if(direction=='up'){
+    title=paste(group, 'Significantly Enriched Pathways' )
+  }
+
+  go=df_go %>% dplyr::select(pathway,Name, padj_avg, p_transform, NES_avg, gene_ratio_avg)
+  go=go%>%mutate('db'='GO')
+
+  kegg=df_kegg%>%dplyr::select(pathway, Name, padj_avg,p_transform, NES_avg, gene_ratio_avg )
+  kegg=kegg%>%mutate('db'='KEGG')
+
+  combined=rbind(go, kegg)
+  
+  if(direction=='up'){
+  combined=combined %>%arrange(p_transform) %>% mutate(Name=factor(Name, levels=Name)) 
+  } else if (direction=='down'){
+  combined=combined %>%arrange(desc(p_transform)) %>% mutate(Name=factor(Name, levels=Name)) 
+  }
+
+  p=ggplot(combined, aes(x=p_transform, y=Name)) + 
+  geom_point(aes(colour=gene_ratio_avg, shape=db), size=3) + 
+  geom_point(shape = as.factor(combined$db),size = 3,colour = "black") +
+  labs(title=title) +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+        
+  theme_bw() + xlab('p value (-log10 scale)') + ylab('Significant Pathways') +
+ #geom_text(aes(label = percent, vjust = 0.5, hjust=-0.5)) + 
+  scale_size(guide="none") +
+  scale_color_continuous(low='lightgray', high='darkgreen', name = "Gene Ratio")+
+        guides(shape = guide_legend(title = "Database"))
+  
+  print(p)
+  
+  # plotname=paste(group, 'both', direction, sep = '_')
+  # png(filename=paste0('GSEA/figures/', plotname, '.png'), units = 'in', height = 9, width = 9, res = 300)
+  # print(p)
+  # dev.off()
+  
+  return(combined)
+}
+```
+
+
+# G10 Analysis
+### GO analysis
+go_gmt has pathway name as a GO term, and the genes as uniprot
+kegg_gmt has pathway name as a KEGG pathway, and genes as kegg genes
+
+```{r}
+pathup='GSEA/G10/G10_GO_gsea_up.tsv'
+pathdown='GSEA/G10/G10_GO_gsea_down.tsv'
+
+G10_go_full_up=as.data.frame(mega_pathway_analysis(G10_G0, group = 'G10', ont = 'GO', path_up = pathup, path_down = pathdown)[1])
+G10_go_full_down=as.data.frame(mega_pathway_analysis(G10_G0, group = 'G10', ont = 'GO', path_up = pathup, path_down = pathdown)[2])
+```
+
+```{r revigo}
+G10_trimmed_down=read_tsv('GSEA/G10/G10_trimmed_down.tsv')
+G10_trimmed_up=read_tsv('GSEA/G10/G10_trimmed_up.tsv')
+
+G10_go_up=as.data.frame(go_trim_merger(G10_trimmed_up, G10_trimmed_down, G10_go_full_up, G10_go_full_down)[1])
+G10_go_down=as.data.frame(go_trim_merger(G10_trimmed_up, G10_trimmed_down, G10_go_full_up, G10_go_full_down)[2])
+
+# pathway_visualizer(G10_go_down, group = 'G10', ont = 'GO', direction = 'down')
+# pathway_visualizer(G10_go_up, group = 'G10', ont = 'GO', direction = 'up')
+```
+
+### KEGG analysis
+```{r}
+pathup='GSEA/G10/G10_KEGG_gsea_up.tsv'
+pathdown='GSEA/G10/G10_KEGG_gsea_down.tsv'
+
+G10_kegg_full_up=as.data.frame(mega_pathway_analysis(G10_G0, group = 'G10', ont = 'KEGG', path_up = pathup, path_down = pathdown)[1])
+G10_kegg_full_down=as.data.frame(mega_pathway_analysis(G10_G0, group = 'G10', ont = 'KEGG', path_up = pathup, path_down = pathdown)[2])
+
+G10_kegg_up=kegg_formatter(G10_kegg_full_up)
+G10_kegg_down=kegg_formatter(G10_kegg_full_down)
+
+# pathway_visualizer(G10_kegg_up, group = 'G10', ont = 'KEGG', direction = 'up')
+# pathway_visualizer(G10_kegg_down, group = 'G10', ont = 'KEGG', direction = 'down')
+```
+
+### Combined Plot
+
+```{r}
+plot_combiner(G10_go_down, G10_kegg_down, group = 'G10', direction = 'down')
+G10_combined_up=plot_combiner(G10_go_up, G10_kegg_up, group = 'G10', direction = 'up')
+```
+
+# G10 beautification
+
+```{r}
+G10_combined_up=G10_combined_up[G10_combined_up$pathway!='GO:0055086', ]
+G10_combined_up=G10_combined_up[G10_combined_up$pathway!='GO:0043412', ]
+G10_combined_up$Name=as.character(G10_combined_up$Name)
+```
+
+```{r}
+G10_combined_up$Name[G10_combined_up$Name=='RNA processing']='primary RNA processing'
+G10_combined_up$Name[G10_combined_up$Name=='transposition']='transposition of DNA segments'
+G10_combined_up
+```
+```{r}
+G10_combined_up$Name=str_to_title(G10_combined_up$Name)
+```
+```{r}
+G10_combined_up
+```
+```{r}
+G10_combined_up$Name[G10_combined_up$Name=='Transposition Of Dna Segments']='Transposition of DNA Segments'
+G10_combined_up$Name[G10_combined_up$Name=='Rna Modification']='RNA Modification'
+G10_combined_up$Name[G10_combined_up$Name=='Primary Rna Processing']='Primary RNA Processing'
+```
+
+
+```{r}
+G10_combined_up=G10_combined_up %>%arrange(p_transform) %>% mutate(Name=factor(Name, levels=Name)) 
+```
+
+```{r}
+png('PRINT/G10_pathways.png', units = 'in', height = 3, width = 12, res = 300)
+ p=ggplot(G10_combined_up, aes(x=p_transform, y=Name)) + 
+  geom_point(aes(colour=gene_ratio_avg, shape=db), size=3) + 
+  geom_point(shape = as.factor(G10_combined_up$db),size = 3,colour = "black") +
+  labs(title='Significantly Enriched Pathways', subtitle = '10 Mm Glucose') +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+        
+  theme_bw() + xlab('p value (-log10 scale)') + 
+   ylab('') +
+ #geom_text(aes(label = percent, vjust = 0.5, hjust=-0.5)) + 
+  scale_size(guide="none") +
+  #scale_color_continuous(low='lightgray', high='darkgreen', name = "Gene Ratio")+
+   #scale_color_gradient2(low='gold', mid = 'lightgreen', high='darkgreen', midpoint = 0.6, name = "Gene Ratio")+
+   # scale_color_gradient(high = munsell::mnsl("5P 2/12"), low = munsell::mnsl("5P 7/12")) + 
+           guides(shape = guide_legend(title = "Database", order = 2))+
+    scale_color_distiller(palette = "YlOrBr", direction = 1, name='Gene Ratio')+
+    theme(axis.text.x = element_text(size = 16),
+        axis.text.y = element_text(size = 16))+
+  theme(legend.text = element_text(size=16))+
+  theme(axis.title.x =element_text(size=16) )+
+  theme(axis.title.y = element_text(size=16))+
+  theme(legend.title = element_text(size=16))
+
+ print(p)
+dev.off()
+```
+
+
+
+
+# G17 Analysis
+### GO analysis
+go_gmt has pathway name as a GO term, and the genes as uniprot
+kegg_gmt has pathway name as a KEGG pathway, and genes as kegg genes
+
+```{r}
+pathup='GSEA/G17/G17_GO_gsea_up.tsv'
+pathdown='GSEA/G17/G17_GO_gsea_down.tsv'
+
+G17_go_full_up=as.data.frame(mega_pathway_analysis(G17_G0, group = 'G17', ont = 'GO', path_up = pathup, path_down = pathdown)[1])
+G17_go_full_down=as.data.frame(mega_pathway_analysis(G17_G0, group = 'G17', ont = 'GO', path_up = pathup, path_down = pathdown)[2])
+
+G17_trimmed_down=read_tsv('GSEA/G17/G17_trimmed_down.tsv')
+G17_trimmed_up=read_tsv('GSEA/G17/G17_trimmed_up.tsv')
+
+G17_go_up=as.data.frame(go_trim_merger(G17_trimmed_up, G17_trimmed_down, G17_go_full_up, G17_go_full_down)[1])
+G17_go_down=as.data.frame(go_trim_merger(G17_trimmed_up, G17_trimmed_down, G17_go_full_up, G17_go_full_down)[2])
+
+# pathway_visualizer(G17_go_down, group = 'G17', ont = 'GO', direction = 'down')
+# pathway_visualizer(G17_go_up, group = 'G17', ont = 'GO', direction = 'up')
+
+pathup='GSEA/G17/G17_KEGG_gsea_up.tsv'
+pathdown='GSEA/G17/G17_KEGG_gsea_down.tsv'
+
+G17_kegg_full_up=as.data.frame(mega_pathway_analysis(G17_G0, group = 'G17', ont = 'KEGG', path_up = pathup, path_down = pathdown)[1])
+G17_kegg_full_down=as.data.frame(mega_pathway_analysis(G17_G0, group = 'G17', ont = 'KEGG', path_up = pathup, path_down = pathdown)[2])
+
+G17_kegg_up=kegg_formatter(G17_kegg_full_up)
+G17_kegg_down=kegg_formatter(G17_kegg_full_down)
+
+# pathway_visualizer(G17_kegg_up, group = 'G17', ont = 'KEGG', direction = 'up')
+# pathway_visualizer(G17_kegg_down, group = 'G17', ont = 'KEGG', direction = 'down')
+
+G17_combined_down=plot_combiner(G17_go_down, G17_kegg_down, group = 'G17', direction = 'down')
+G17_combined_up=plot_combiner(G17_go_up, G17_kegg_up, group = 'G17', direction = 'up')
+
+G17_combined_down=G17_combined_down[G17_combined_down$pathway!='GO:0006796', ]
+
+G17_combined_down=G17_combined_down[G17_combined_down$pathway!='GO:0044281', ]
+
+G17_combined_down=G17_combined_down[G17_combined_down$pathway!='GO:0009056', ]
+
+G17_combined_down=G17_combined_down[G17_combined_down$pathway!='GO:0044238', ]
+
+G17_combined_down$Name=as.character(G17_combined_down$Name)
+
+G17_combined_down$Name[G17_combined_down$Name=='Two-component system']='Two-component signal transduction system'
+G17_combined_down$Name[G17_combined_down$Name=='Ribosome']='Ribosome/tRNA translation'
+
+G17_combined_down$Name=str_to_title(G17_combined_down$Name)
+
+G17_combined_down$Name[G17_combined_down$Name=='Citrate Cycle (Tca Cycle)']='Citrate Cycle (TCA Cycle)'
+G17_combined_down$Name[G17_combined_down$Name=='Ribosome/Trna Translation']='Ribosome / tRNA Translation'
+G17_combined_down$Name[G17_combined_down$Name=='Energy Derivation By Oxidation Of Organic Compounds']='Energy Derivation by Oxidation of Organic Compounds'
+G17_combined_down$Name[G17_combined_down$Name=='Glycine, Serine And Threonine Metabolism']='Glycine, Serine & Threonine Metabolism'
+G17_combined_down$Name[G17_combined_down$Name=='Cysteine And Methionine Metabolism']='Cysteine & Methionine Metabolism'
+
+G17_combined_down=G17_combined_down %>%arrange(desc(p_transform)) %>% mutate(Name=factor(Name, levels=Name)) 
+```
+
+
+```{r}
+#png('GSEA/pretty_G17_down.png', units = 'in', height = 7, width = 8, res = 300)
+
+p= ggplot(G17_combined_down, aes(x=p_transform, y=Name)) + 
+  geom_point(aes(colour=gene_ratio_avg, shape=db), size=3) + 
+  geom_point(shape = as.factor(G17_combined_down$db),size = 3,colour = "black") +
+      guides(shape = guide_legend(title = "Database"))+
+            scale_color_distiller(direction = 1, name='Gene Ratio')+  
+  labs(title='Significantly Suppressed Pathways', subtitle = '17 Mm Glucose') +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+  theme_bw() + xlab('p value (-log10 scale)') + ylab('') +
+  scale_size(guide="none") 
+print(p)
+#dev.off()
+```
+spacer
+
+# Drew Edits
+
+1) If we can edit pathway names then I’d offer the following upgrades:
+
+— anything that is “Metabolic Process” could be “Metabolism”; what do you think?
+— anything that is “Biosynthetic Process” could be “Biosynthesis”; ditto?
+
+```{r}
+G17_combined_down$Name=gsub('Metabolic Process', 'Metabolism', G17_combined_down$Name)
+G17_combined_down$Name=gsub('Biosynthetic Process', 'Biosynthesis', G17_combined_down$Name)
+
+G10_combined_up$Name=gsub('Metabolic Process', 'Metabolism', G10_combined_up$Name)
+G10_combined_up$Name=gsub('Biosynthetic Process', 'Biosynthesis', G10_combined_up$Name)
+```
+
+
+(3) “Gene Ratio” for fraction of pathway genes differentially regulated is a potentially confusing label.  I.e., b/c we are referring to fold change throughout (w/r/t/ differential gene expression) and that is also a ratio I worry that gene ratio here doesn’t clearly make the point.  “Percentage of Pathway Genes” and using 0-100% may work better; what do you think?
+```{r}
+G17_combined_down=G17_combined_down%>%mutate(gene_ratio_avg=round(gene_ratio_avg*100))
+G17_combined_down=G17_combined_down %>%arrange(desc(p_transform)) %>% mutate(Name=factor(Name, levels=Name)) 
+
+
+G10_combined_up=G10_combined_up%>%mutate(gene_ratio_avg=round(gene_ratio_avg*100))
+G10_combined_up=G10_combined_up %>%arrange(p_transform) %>% mutate(Name=factor(Name, levels=Name)) 
+```
+
+(4) I *really* like your aesthetic choices on the plot for repressed genes; let’s keep this; can we make the spacing exactly the same for the upregulated genes.
+
+```{r}
+G17_combined_down[1:5, 4]=5
+G10_combined_up[5, 4]=5
+```
+
+
+
+```{r}
+png('PRINT/G10_pathways.png', units = 'in', height = 3, width = 12, res = 300)
+ p=ggplot(G10_combined_up, aes(x=p_transform, y=Name)) + 
+  geom_point(aes(colour=gene_ratio_avg, shape=db), size=3) + 
+  geom_point(shape = as.factor(G10_combined_up$db),size = 3,colour = "black") +
+  labs(title='Significantly Enriched Pathways', subtitle = '10 Mm Glucose') +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+        
+  theme_bw() + xlab('p value (-log10 scale)') + 
+   ylab('') +
+ #geom_text(aes(label = percent, vjust = 0.5, hjust=-0.5)) + 
+  scale_size(guide="none") +
+  #scale_color_continuous(low='lightgray', high='darkgreen', name = "Gene Ratio")+
+   #scale_color_gradient2(low='gold', mid = 'lightgreen', high='darkgreen', midpoint = 0.6, name = "Gene Ratio")+
+   # scale_color_gradient(high = munsell::mnsl("5P 2/12"), low = munsell::mnsl("5P 7/12")) + 
+           guides(shape = guide_legend(title = "Database", order = 2))+
+  xlim(1,9)+
+    scale_color_distiller(palette = "YlOrBr", direction = 1, name='Percentage of\nPathway Genes')+
+       theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))+
+  theme(legend.text = element_text(size=12))+
+  theme(axis.title.x =element_text(size=12) )+
+  theme(axis.title.y = element_text(size=12))+
+  theme(legend.title = element_text(size=12))
+
+ print(p)
+dev.off()
+```
+
+
+```{r}
+png('PRINT/G17_pathways.png', units = 'in', height = 10, width = 12, res = 300)
+G17_combined_down=G17_combined_down %>%arrange(desc(p_transform)) %>% mutate(Name=factor(Name, levels=Name)) 
+p= ggplot(G17_combined_down, aes(x=p_transform, y=Name)) + 
+  geom_point(aes(colour=gene_ratio_avg, shape=db), size=3) + 
+  geom_point(shape = as.factor(G17_combined_down$db),size = 3,colour = "black") +
+      guides(shape = guide_legend(title = "Database"))+
+            scale_color_distiller(direction = 1, name='Percentage of\nPathway Genes')+  
+  labs(title='Significantly Suppressed Pathways', subtitle = '17 Mm Glucose') +
+  theme(axis.title = element_text(face="bold", size=20))+
+  theme(axis.text.x= element_text(face='bold', size=20))+
+  theme(axis.text.y= element_text(face='bold', size=20))+
+  theme_bw() + xlab('p value (-log10 scale)') + ylab('') +
+  scale_size(guide="none") +xlim(1,9)+
+        theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))+
+  theme(legend.text = element_text(size=12))+
+  theme(axis.title.x =element_text(size=12) )+
+  theme(axis.title.y = element_text(size=12))+
+  theme(legend.title = element_text(size=12))
+print(p)
+dev.off()
+```
+
+
+
+spacer

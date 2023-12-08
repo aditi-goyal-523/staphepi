@@ -1,0 +1,344 @@
+---
+title: "dose response"
+author: "Aditi Goyal"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message=FALSE)
+#knitr::opts_chunk$set(warning =FALSE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=70), tidy=TRUE)
+
+rm(list=ls())
+```
+
+```{r}
+setwd('~/Desktop/KAISHA')
+```
+
+```{r}
+library(tidyverse)
+```
+
+# DRomics
+```{r}
+library(DRomics)
+```
+
+# Loading Data
+```{r}
+all=read_tsv('featurecounts_rev/rnaseq_round2/rnaseq_round2.featurecounts.gene_name_extended_annot.tsv')
+all=as.data.frame(all)
+#split data into a gene_metadata set and the raw counts matrix
+gene_meta=all[, 1:8]
+counts=all[, c(1, 9:35)]
+counts=counts %>% relocate(c('G2_1', "G2_2", 'G2_3'), .after = 'G0_3') %>%
+  relocate(c("G5_1", "G5_2", "G5_3"), .after = 'G2_3')
+```
+
+```{r}
+# switch_genes=c('ssrA',
+#         'pflB', 
+#         'F1613_RS01265',
+#         'F1613_RS06320',
+#         'F1613_RS05685',
+#         'F1613_RS07705',
+#         'F1613_RS01255',
+#         'F1613_RS06485',
+#         'F1613_RS02255',
+#         'raiA'
+#         )
+# 
+# steady_genes=c('lqo',
+#                "F1613_RS08490",
+#                "typA",
+#                "rpoD",
+#                "rnr",
+#                "noc",
+#                "F1613_RS09725")
+
+set=read.delim('lfc2_gene_list.txt')
+set1=read.delim('lfc1_gene_list.txt')
+```
+
+
+# LFC 2+ genes
+```{r}
+# only genes that have an absolute lfc of >=2 at least once across G2-G17
+lfc2_gene_counts=counts[counts$Geneid%in%set$x, ]
+lfc2_gene_counts=lfc2_gene_counts[, 1:16]
+lfc2_gene_counts=rbind(c('dose', 0, 0, 0, 2, 2, 2, 5, 5, 5, 10, 10, 10, 17, 17, 17), lfc2_gene_counts)
+lfc2_gene_counts=type.convert(lfc2_gene_counts, as.is = TRUE)
+```
+
+```
+# only genes that have an absolute lfc of >=1 at least once across G2-G17
+lfc1_gene_counts=counts[counts$Geneid%in%set1$x, ]
+lfc1_gene_counts=lfc1_gene_counts[, 1:16]
+lfc1_gene_counts=rbind(c('dose', 0, 0, 0, 2, 2, 2, 5, 5, 5, 10, 10, 10, 17, 17, 17), lfc1_gene_counts)
+lfc1_gene_counts=type.convert(lfc1_gene_counts, as.is = TRUE)
+```
+
+```{r}
+lfc2_gene_counts
+```
+```{r}
+lfc.o.RNAseq <- RNAseqdata(lfc2_gene_counts, transfo.method = "rlog")
+plot(lfc.o.RNAseq, cex.main = 0.8, col = "green")
+```
+
+```
+lfc.o.RNAseq1 <- RNAseqdata(lfc1_gene_counts, transfo.method = "rlog")
+plot(lfc.o.RNAseq1, cex.main = 0.8, col = "green")
+```
+
+```{r}
+set.seed(12345)
+lfc_quad <- itemselect(lfc.o.RNAseq, select.method = "quadratic", FDR = .05)
+#lfc_quad1 <- itemselect(lfc.o.RNAseq1, select.method = "quadratic", FDR = .05)
+```
+
+
+```{r}
+set.seed(12345)
+lfc_f <- drcfit(lfc_quad, progressbar = FALSE)
+#lfc_f1 <- drcfit(lfc_quad1, progressbar = FALSE)
+```
+
+```{r}
+lfc_f
+
+#lfc_f1
+```
+
+```{r}
+x=lfc_f$fitres
+x$id=gsub('_C', '', x$id)
+x$id=gsub('F1613_RS', '', x$id)
+lfc_f$fitres=x
+```
+
+```{r}
+png('PRINT/drc.png',units="in", width=10, height=8, res=300)
+plot(lfc_f, 38 )
+dev.off()
+```
+
+```{r}
+dat=lfc_f$fitres
+```
+```{r}
+dat[dat$id=='pflB',	]
+dat[dat$id=='F1613_RS06485',	]
+```
+
+
+
+
+
+```{r}
+y=lfc_f1$fitres
+y[y$id=='F1613_RS02255', ]
+```
+```{r}
+x=lfc_f$fitres
+x[x$id=='F1613_RS02255', ]
+```
+```{r}
+y[y$id %in% x$id, ]
+```
+
+
+```{r}
+targetitems <- c("F1613_RS02255_C")
+targetplot(targetitems, f = lfc_f1)
+```
+
+
+# Hand picked switch genes
+```{r}
+order=lfc_f$fitres
+
+order[order$id %in% paste0(switch_genes, '_C'), ]
+```
+
+```{r}
+# switch point genes we selected ourselves
+switch_gene_counts=counts[counts$Geneid%in%paste0(switch_genes, '_C'), ]
+switch_gene_counts=rbind(c('dose', 0, 0, 0, 2, 2, 2, 5, 5, 5, 10, 10, 10, 17, 17, 17),switch_gene_counts)
+switch_gene_counts=switch_gene_counts[, 1:16]
+switch_gene_counts=type.convert(switch_gene_counts, as.is = TRUE)
+```
+
+```{r}
+switch.o.RNAseq <- RNAseqdata(switch_gene_counts, transfo.method = "rlog")
+```
+
+```{r}
+plot(switch.o.RNAseq, cex.main = 0.8, col = "green")
+```
+
+```{r}
+switch_quad <- itemselect(switch.o.RNAseq, select.method = "quadratic", FDR = .99)
+```
+
+```{r}
+switch_quad
+```
+All 10 are showing up if we set FDR to allow everything
+
+```{r}
+switch_f <- drcfit(switch_quad, progressbar = FALSE)
+```
+```{r}
+switch_f
+```
+```{r}
+switch_f$unfitres
+```
+```{r}
+plot(switch_f) 
+```
+
+
+# Dose insensitive genes
+```{r}
+# dose insensitive genes we selected ourselves
+steady_gene_counts=counts[counts$Geneid%in%paste0(steady_genes, '_C'), ]
+steady_gene_counts=rbind(c('dose', 0, 0, 0, 2, 2, 2, 5, 5, 5, 10, 10, 10, 17, 17, 17),steady_gene_counts)
+steady_gene_counts=steady_gene_counts[, 1:16]
+steady_gene_counts=type.convert(steady_gene_counts, as.is = TRUE)
+```
+
+```{r}
+steady.o.RNAseq <- RNAseqdata(steady_gene_counts, transfo.method = "rlog")
+```
+
+```{r}
+plot(steady.o.RNAseq, cex.main = 0.8, col = "green")
+```
+
+```{r}
+steady_quad <- itemselect(steady.o.RNAseq, select.method = "quadratic", FDR = .99)
+```
+
+```{r}
+steady_quad
+```
+All 7 are showing up if we set FDR to allow everything
+
+```{r}
+steady_f <- drcfit(steady_quad, progressbar = FALSE)
+```
+The procedure used to select the best fit is based on an information criterion as described in Larras et al. 2018 and in ?drcfit. The classical and former default option of the AIC (Akaike criterion - default information criterion used in DRomics versions < 2.2-0) was replaced by the default use of the AICc (second-order Akaike criterion) in order to prevent the overfitting that may occur with dose-response designs with a small number of data points, as recommended and now classically done in regression (Hurvich and Tsai, 1989; Burnham and Anderson DR, 2004).
+```{r}
+steady_f
+```
+
+```{r}
+steady_f$unfitres
+```
+note that 5 out of the 7 genes we selected as constant failed due to 'constant model', indicating that these genes truly are constant in response to glucose
+
+
+
+# entire expression dataset
+```{r}
+# full expression data set
+all_data=rbind(c('dose', 0, 0, 0, 2, 2, 2, 5, 5, 5, 10, 10, 10, 17, 17, 17),counts)
+all_data=all_data[, 1:16]
+all_data=type.convert(all_data, as.is = TRUE)
+```
+
+```{r}
+all.o.RNAseq <- RNAseqdata(all_data, transfo.method = "rlog")
+```
+
+```{r}
+plot(all.o.RNAseq, cex.main = 0.8, col = "green")
+```
+
+```{r}
+all_quad <- itemselect(all.o.RNAseq, select.method = "quadratic", FDR = .99)
+```
+
+```{r}
+all_quad
+```
+2333 of 2356 are showing up if we set FDR to allow everything. Note that many of our candidates show up
+
+```{r}
+all_f <- drcfit(all_quad, progressbar = FALSE)
+```
+
+```{r}
+all_f
+```
+1313 genes failed to model, 1020 did graph. Note that none of them follow Hill curve
+
+
+```{r}
+plot(all_f)
+```
+
+
+```{r}
+order = all_f$fitres
+
+order[order$id %in% paste0(switch_genes, "_C"), ]
+```
+
+```{r}
+(r <- bmdcalc(all_f, x = 50))
+```
+
+```{r}
+(b <- bmdboot(r,  progressbar = FALSE))
+```
+
+```{r}
+plot(all_f, BMDoutput = r) 
+```
+
+```{r}
+#plotfit2pdf(lfc_f) 
+```
+
+```{r}
+targetitems <- c("gap_C")
+targetplot(targetitems, f = all_f)
+```
+
+```{r}
+dat=all_f$fitres
+```
+
+```{r}
+counts[counts$Geneid=='gap_C', ]
+```
+```{r}
+
+
+targetitems <- c("F1613_RS01265_C")
+targetplot(targetitems, f = all_f)
+```
+
+```{r}
+G2=read.csv('DESeq output/G2_G0.csv')
+
+G2[G2$X=='gap_C',] #G2 log2fold change= -.0823
+
+-0.202326719
+```
+
+
+```{r}
+dat[dat$id=='gap_C', ]
+
+16.88967
+
+```
+
+

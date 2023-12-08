@@ -1,0 +1,4 @@
+TermID	Name	Value	LogSize	Frequency	Uniqueness	Dispensability	Representative
+GO:0071705	"nitrogen compound transport"	1.86044730800692	6.156978993052161	4.774462994776034	1	0	null
+GO:0072527	"pyrimidine-containing compound metabolic process"	2.1191976	5.4777866629092395	0.9993809312454497	0.7437019693834224	0.20995127	null
+GO:0072528	"pyrimidine-containing compound biosynthetic process"	2.3135893	5.422474931931271	0.8798712581797437	0.3838205597058178	0	null
